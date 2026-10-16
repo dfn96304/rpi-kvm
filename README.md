@@ -98,6 +98,12 @@ Raw capture needs USB bandwidth and JPEG encoding CPU; MJPEG capture is preferab
 
 MJPEG keeps the stack small and widely compatible, but uses more network bandwidth than inter-frame codecs. At an average 100 KiB/frame and 30 FPS, expect roughly 25 Mbit/s per viewer. Real card quality, frame sizes and latency need measurement. There is no measured Pi CPU/latency claim and no WebRTC/H.264 stack hidden in the dependencies.
 
+## Troubleshooting login
+
+If an older version reports `Same-origin browser request required` immediately after submitting the login form, update the script, restart `serve`, and reload the login page before submitting again. The initial prototype sent `Referrer-Policy: no-referrer`, which can make browsers send `Origin: null` on form POSTs. The corrected policy is `strict-origin-when-cross-origin`; origin and CSRF checks remain enabled.
+
+If the error persists, open the server directly or through the documented SSH tunnel. A reverse proxy that changes the external scheme/host can also cause an origin mismatch; this server does not trust forwarded headers.
+
 ## Experimental bidirectional audio
 
 Audio is an optional alternative profile, **without mass storage**. DWC2 has a limited endpoint budget. Two HID functions + storage + duplex UAC2 including feedback may exceed it; this implementation does not promise all four USB functions together. Even the audio profile needs testing on the particular kernel/controller. On kernels supporting `no_out_endpoint`, unused interrupt OUT endpoints are disabled for HID.
