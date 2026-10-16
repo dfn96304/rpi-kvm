@@ -1,0 +1,17 @@
+[Unit]
+Description=Minimal Python USB KVM
+After=network.target systemd-modules-load.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/rpi-kvm
+ExecStartPre=/usr/bin/python3 /opt/rpi-kvm/rpi_kvm.py setup --reuse --images /opt/rpi-kvm/images
+ExecStart=/usr/bin/python3 /opt/rpi-kvm/rpi_kvm.py serve --images /opt/rpi-kvm/images --token-file /opt/rpi-kvm/kvm.token
+Restart=on-failure
+RestartSec=3
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
