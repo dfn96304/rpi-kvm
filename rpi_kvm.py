@@ -564,7 +564,8 @@ class Handler(BaseHTTPRequestHandler):
     def headers_safe(self):
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Referrer-Policy', 'no-referrer')
+        # no-referrer can suppress Origin on browser form POSTs, breaking login.
+        self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
         self.send_header('X-Frame-Options', 'DENY')
         # UI is embedded: only this page's nonce authorizes inline script.
         nonce = self.state['csrf']

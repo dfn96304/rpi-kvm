@@ -142,6 +142,25 @@ class HTTP(unittest.TestCase):
         self.assertIn(b'<script nonce="' + b'b' * 32, body)
         self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
 
+    def test_login_page_preserves_browser_form_origin(self):
+        # Browsers apply the document policy to its form POST. no-referrer
+        # makes that request's Origin null, so the policy is part of login's
+        # response contract, not just a cosmetic security header.
+        code, headers, body = self.request('GET', '/')
+        self.assertEqual(code, 200)
+        self.assertEqual(headers['Referrer-Policy'], 'strict-origin-when-cross-origin')
+        self.assertIn(b'action="/login"', body)
+        code, _, _ = self.request('POST', '/login', 'token=' + self.state['token'],
+                                   {'Origin': f'http://127.0.0.1:{self.port}'})
+        self.assertEqual(code, 303)
+
+    def test_login_rejects_cross_site_and_opaque_origins(self):
+        for origin in ['http://evil.example', 'null', f'http://127.0.0.1:{self.port + 1}', None]:
+            with self.subTest(origin=origin):
+                headers = {} if origin is None else {'Origin': origin}
+                code, _, _ = self.request('POST', '/login', 'token=' + self.state['token'], headers)
+                self.assertEqual(code, 403)
+
     def test_csrf_and_validation(self):
         obj = json.dumps(dict(client='a', kind='keyboard', mods=0, keys=[4]))
         headers = self.headers(); headers['Origin'] = 'http://evil.example'
