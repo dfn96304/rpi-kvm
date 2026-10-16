@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.token
+.rpi-kvm.lock
+images/
+*.pem
+*.key
+*.crt
