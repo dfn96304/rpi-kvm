@@ -15,6 +15,7 @@ import re
 import secrets
 import select
 import signal
+import socket
 import ssl
 import struct
 import subprocess
@@ -280,6 +281,23 @@ class JPEGParser:
         return frames
 
 
+def terminate_process(process):
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def drain_stderr(stream, consume):
+    """The reader owns its pipe; cleanup joins it instead of closing under it."""
+    with stream:
+        for line in stream:
+            consume(line.decode(errors='replace').strip()[:400])
+
+
 class Video:
     def __init__(self, args):
         self.args = args
@@ -307,15 +325,15 @@ class Video:
 
     def worker(self):
         while not self.stop.is_set():
+            process, drainer, failure = None, None, None
+            errors = collections.deque(maxlen=8)
             try:
                 self.process = subprocess.Popen(self.command(), stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, bufsize=0)
                 process = self.process
-                errors = collections.deque(maxlen=8)
-                def drain():
-                    for line in process.stderr:
-                        errors.append(line.decode(errors='replace').strip()[:400])
-                drainer = threading.Thread(target=drain, daemon=True)
+                # Bind this attempt's pipe and deque as arguments, not loop closures.
+                drainer = threading.Thread(target=drain_stderr,
+                                           args=(process.stderr, errors.append), daemon=True)
                 drainer.start()
                 parser = JPEGParser()
                 while not self.stop.is_set():
@@ -329,28 +347,28 @@ class Video:
                             self.updated = time.monotonic()
                             self.error = None
                             self.condition.notify_all()
-                drainer.join(timeout=.2)
-                self.error = '; '.join(errors) or 'Capture stopped; retrying'
             except (OSError, ValueError) as exc:
-                self.error = str(exc)
+                failure = self.error = str(exc)
             finally:
-                if self.process:
-                    self.process.terminate()
-                    try:
-                        self.process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        self.process.kill()
-                        self.process.wait()
-                    self.process.stdout.close()
-                    self.process.stderr.close()
+                if process:
+                    terminate_process(process)
+                    # The exited child closes its write ends. Let the reader reach
+                    # EOF before another retry; it closes stderr itself.
+                    if drainer:
+                        drainer.join()
+                    else:
+                        process.stderr.close()
+                    process.stdout.close()
+                    self.error = '; '.join(errors) or failure or 'Capture stopped; retrying'
             if not self.stop.is_set():
                 LOG.warning('Video: %s', self.error)
             self.stop.wait(2)
 
     def close(self):
         self.stop.set()
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        process = self.process
+        if process:
+            terminate_process(process)
         with self.condition:
             self.condition.notify_all()
         self.thread.join(timeout=4)
@@ -416,6 +434,7 @@ class Audio:
         self.condition = threading.Condition()
         self.chunks = collections.deque(maxlen=4)
         self.processes = []
+        self.readers = []
         self.stop = threading.Event()
         self.write_lock = threading.Lock()
         self.error = None
@@ -434,17 +453,20 @@ class Audio:
             os.set_blocking(playback.stdin.fileno(), False)
             self.playback = playback
             for process in self.processes:
-                threading.Thread(target=self.errors, args=(process,), daemon=True).start()
+                reader = threading.Thread(target=drain_stderr,
+                                          args=(process.stderr, self.audio_error), daemon=True)
+                self.readers.append(reader)
+                reader.start()
             self.thread = threading.Thread(target=self.reader, args=(capture,), daemon=True)
+            self.readers.append(self.thread)
             self.thread.start()
         except Exception:
             self.close()
             raise
 
-    def errors(self, process):
-        for line in process.stderr:
-            self.error = line.decode(errors='replace').strip()[:400]
-            LOG.warning('Audio: %s', self.error)
+    def audio_error(self, line):
+        self.error = line
+        LOG.warning('Audio: %s', self.error)
 
     def reader(self, process):
         while not self.stop.is_set():
@@ -494,13 +516,10 @@ class Audio:
         with self.condition:
             self.condition.notify_all()
         for process in self.processes:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            terminate_process(process)
+        for reader in self.readers:
+            reader.join()
+        for process in self.processes:
             for pipe in (process.stdin, process.stdout, process.stderr):
                 if pipe:
                     pipe.close()
@@ -514,7 +533,19 @@ class Server(ThreadingHTTPServer):
         self.state = state
         self.slots = threading.BoundedSemaphore(16)
         self.streams = threading.BoundedSemaphore(4)
-        super().__init__(address, Handler)
+        # HTTPServer defaults to AF_INET, which cannot bind an IPv6 address.
+        family, _, _, _, resolved = socket.getaddrinfo(
+            address[0], address[1], type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)[0]
+        self.address_family = family
+        super().__init__(resolved, Handler)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6:
+            # Explicit wildcard dual stack, independent of the OS v6-only default.
+            # Specific IPv6 addresses (including ::1) remain IPv6-only.
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY,
+                                   int(self.server_address[0] != '::'))
+        super().server_bind()
 
     def process_request(self, request, address):
         if not self.slots.acquire(blocking=False):
@@ -640,9 +671,12 @@ class Handler(BaseHTTPRequestHandler):
                 with video.condition:
                     video.condition.wait_for(lambda: video.sequence != seq or video.stop.is_set(), 2)
                     frame, current = video.frame, video.sequence
-                if frame is None or current == seq:
+                if current == seq:
                     continue
+                # Also advance when no frame exists yet, so wait_for can sleep.
                 seq = current
+                if frame is None:
+                    continue
                 self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' +
                                  str(len(frame)).encode() + b'\r\n\r\n' + frame + b'\r\n')
                 self.wfile.flush()
@@ -814,7 +848,8 @@ def main():
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(args.cert, args.key)
             server.socket = ctx.wrap_socket(server.socket, server_side=True)
-        LOG.info('Open %s://%s:%s', 'https' if args.cert else 'http', args.listen, args.port)
+        display_host = f'[{args.listen}]' if ':' in args.listen else args.listen
+        LOG.info('Open %s://%s:%s', 'https' if args.cert else 'http', display_host, args.port)
         def terminate(_signum, _frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, terminate)

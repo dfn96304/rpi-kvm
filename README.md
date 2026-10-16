@@ -138,6 +138,10 @@ SSH tunnelling is the shortest secure route. For direct LAN access, supply a cer
 sudo python3 rpi_kvm.py serve --listen 0.0.0.0 --cert /path/server.crt --key /path/server.key
 ```
 
+For IPv4 and IPv6 on the same port, use `--listen "::"`. This explicitly enables IPv4-mapped connections on an IPv6 wildcard socket (requires OS dual-stack support). `--listen 0.0.0.0` is IPv4-only; `--listen "::1"` is IPv6 loopback-only; the default remains IPv4 loopback. For a literal IPv6 address in the browser, use brackets, for example `http://[::1]:8080` or `https://[YOUR_IPV6_ADDRESS]:8080` with TLS. Hostnames bind to the first resolved address; use a numeric address for a specific binding.
+
+If the capture card is absent, video logs a warning and retries every two seconds while keyboard/mouse and storage remain usable. The stream waits for its first frame without spinning, and capture retry/shutdown waits for stderr readers before closing their pipes. A capture child that does not respond to SIGTERM is killed after two seconds during shutdown. The same pipe-lifetime handling is used for experimental audio; this does not add audio-device hotplug recovery.
+
 Plain HTTP on a LAN transports the login token and target screen/input unencrypted; use the tunnel or TLS for actual access. The built-in server is intended for a private network/tunnel, not public internet exposure. Reverse proxies must preserve the expected origin/scheme; forwarded headers are deliberately not trusted. This is not a hardened public multi-user service.
 
 One tab holds a two-second input lease. An inactivity watchdog releases keys/buttons after failed/disconnected input and retries release when the target returns. Switching tabs or losing focus releases input. This depends on the kernel accepting the release report; unplugged targets cannot receive reports until reconnected. HID writes have timeouts, the browser input queue is bounded, and resource limits cap HTTP workers/video viewers. Browser/OS-reserved shortcuts and secure attention keys require explicit buttons or remain unavailable.
